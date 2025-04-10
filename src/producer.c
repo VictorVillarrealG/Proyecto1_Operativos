@@ -40,16 +40,28 @@ int main() {
 
     printf("Conectado al broker.\n");
 
+    // PRIMERO: enviar identificador "PRODUCER"
+
+    if (send(sock_fd, "PRODUCER", strlen("PRODUCER"), 0) == -1) {
+    perror("Error enviando identificador PRODUCER");
+    close(sock_fd);
+    exit(EXIT_FAILURE);
+    }
+
+// Esperar un pequeño momento para que el broker procese
+sleep(1);   // <--- AQUÍ AGREGAS ESTO
+
+
     // Crear un mensaje a enviar
     Message msg;
-    msg.id = 1;  // Puedes cambiar el id si quieres
+    msg.id = 0;  // No importa aquí, el broker asigna el ID final
     snprintf(msg.content, MAX_MESSAGE_CONTENT, "Hola desde el producer!");
 
-    // Enviar el mensaje
+    // SEGUNDO: enviar el mensaje real
     if (send(sock_fd, &msg, sizeof(Message), 0) == -1) {
         perror("Error enviando mensaje");
     } else {
-        printf("Mensaje enviado: ID %d, Contenido: %s\n", msg.id, msg.content);
+        printf("Mensaje enviado: Contenido: %s\n", msg.content);
     }
 
     close(sock_fd); // Cerrar la conexión
