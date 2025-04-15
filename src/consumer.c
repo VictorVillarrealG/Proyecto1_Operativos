@@ -3,10 +3,12 @@
 #include <string.h>
 #include <unistd.h>
 #include <arpa/inet.h>
+#include <time.h>
 
-#define SERVER_IP "127.0.0.1"
-#define SERVER_PORT 5000
+#define BROKER_IP "127.0.0.1"
+#define CONSUMER_PORT 5001
 #define MAX_MESSAGE_CONTENT 256
+#define TIMEOUT_SECONDS 10
 
 typedef struct {
     int id;
@@ -17,31 +19,28 @@ int main() {
     int sock;
     struct sockaddr_in server_addr;
     char buffer[512];
+    time_t last_message_time = time(NULL);
 
-    // Crear socket
     if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
         perror("Error al crear socket");
         exit(EXIT_FAILURE);
     }
 
     server_addr.sin_family = AF_INET;
-    server_addr.sin_port = htons(SERVER_PORT);
-
-    if (inet_pton(AF_INET, SERVER_IP, &server_addr.sin_addr) <= 0) {
-        perror("Dirección inválida/ no soportada");
+    server_addr.sin_port = htons(CONSUMER_PORT);
+    if (inet_pton(AF_INET, BROKER_IP, &server_addr.sin_addr) <= 0) {
+        perror("Dirección inválida o no soportada");
         exit(EXIT_FAILURE);
     }
 
-    // Conectar al broker
     if (connect(sock, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
         perror("Error en la conexión");
         exit(EXIT_FAILURE);
     }
 
-    // Enviar identificador CONSUMER
-    send(sock, "CONSUMER", strlen("CONSUMER"), 0);
+    printf("Conectado al broker (consumer por tiempo).\n");
 
-    // Esperar respuesta READY
+    // Esperar READY
     int bytes = recv(sock, buffer, sizeof(buffer)-1, 0);
     if (bytes <= 0) {
         perror("Error recibiendo READY");
@@ -51,26 +50,11 @@ int main() {
     buffer[bytes] = '\0';
     printf("Broker dice: %s\n", buffer);
 
-    if (strcmp(buffer, "READY") != 0) {
-        printf("No se recibió READY. Cerrando.\n");
-        close(sock);
-        exit(EXIT_FAILURE);
-    }
-
-    // Loop para pedir mensajes
     while (1) {
-        printf("Presiona ENTER para pedir el siguiente mensaje ('NEXT') o escribe 'exit' para salir: ");
-        fgets(buffer, sizeof(buffer), stdin);
+        sleep(1); // Esperar 1 segundo antes de pedir el siguiente mensaje
 
-        if (strncmp(buffer, "exit", 4) == 0) {
-            printf("Saliendo...\n");
-            break;
-        }
-
-        // Mandar NEXT
         send(sock, "NEXT", strlen("NEXT"), 0);
 
-        // Recibir respuesta
         bytes = recv(sock, buffer, sizeof(buffer), 0);
         if (bytes <= 0) {
             printf("Broker desconectado.\n");
@@ -80,9 +64,20 @@ int main() {
         if (bytes == sizeof(Message)) {
             Message* msg = (Message*)buffer;
             printf("Mensaje recibido => ID: %d, Contenido: %s\n", msg->id, msg->content);
+            last_message_time = time(NULL); // reset timeout timer
         } else {
             buffer[bytes] = '\0';
             printf("Respuesta del broker: %s\n", buffer);
+            if (strcmp(buffer, "NO_MESSAGES") != 0) {
+                last_message_time = time(NULL); // reset timeout timer
+            }
+        }
+
+        // Verificar si ha pasado demasiado tiempo sin recibir mensajes
+        if (difftime(time(NULL), last_message_time) >= TIMEOUT_SECONDS) {
+            printf("No se han recibido mensajes en %d segundos. Enviando mensaje de apagado al broker y cerrando.\n", TIMEOUT_SECONDS);
+            send(sock, "SHUTDOWN", strlen("SHUTDOWN"), 0);
+            break;
         }
     }
 
