@@ -1,0 +1,11 @@
+# Ignorar ejecutables
+broker
+producer
+consumer
+
+# Ignorar logs
+log.txt
+
+# Ignorar otros archivos temporales
+*.o
+*.out
