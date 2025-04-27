@@ -40,7 +40,6 @@ int main() {
 
     printf("Conectado al broker (consumer por tiempo).\n");
 
-    // Esperar READY
     int bytes = recv(sock, buffer, sizeof(buffer)-1, 0);
     if (bytes <= 0) {
         perror("Error recibiendo READY");
@@ -51,11 +50,10 @@ int main() {
     printf("Broker dice: %s\n", buffer);
 
     while (1) {
-        sleep(1); // Esperar 1 segundo antes de pedir el siguiente mensaje
-
+	sleep(1);
         send(sock, "NEXT", strlen("NEXT"), 0);
 
-        bytes = recv(sock, buffer, sizeof(buffer), 0);
+	bytes = recv(sock, buffer, sizeof(buffer), 0);
         if (bytes <= 0) {
             printf("Broker desconectado.\n");
             break;

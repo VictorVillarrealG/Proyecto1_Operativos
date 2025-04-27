@@ -43,12 +43,13 @@ typedef struct {
     char content[MAX_MESSAGE_CONTENT];
 } Message;
 
-typedef struct MessageNode {
-    Message msg;
-    struct MessageNode *next;
-} MessageNode;
+typedef struct {
+    Message *buf;
+    size_t cap, head, tail;
+    pthread_mutex_t mutex;
+} MsgQueue;
 
-static MessageNode *msg_head = NULL, *msg_tail = NULL;
+static MsgQueue queue;
 static pthread_mutex_t queue_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 typedef struct {
@@ -65,6 +66,13 @@ typedef struct {
 static ConsumerGroup groups[MAX_GROUPS];
 static int           group_count = 0;
 static pthread_mutex_t groups_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+void init_queue(MsgQueue *q) {
+    q->cap  = 1024;
+    q->buf  = malloc(q->cap * sizeof(Message));
+    q->head = q->tail = 0;
+    pthread_mutex_init(&q->mutex, NULL);
+}
 
 int next_id = 0;
 
@@ -117,27 +125,43 @@ ConsumerGroup* assign_consumer_to_group(int sock) {
     return g;
 }
 
-void enqueue_message(Message m) {
-    MessageNode *n = malloc(sizeof(*n));
-    n->msg = m;
-    n->next = NULL;
-    pthread_mutex_lock(&queue_mutex);
-    if (!msg_tail) msg_head = msg_tail = n;
-    else { msg_tail->next = n; msg_tail = n; }
-    pthread_mutex_unlock(&queue_mutex);
+void enqueue(MsgQueue *q, Message m) {
+    pthread_mutex_lock(&q->mutex);
+
+    size_t next = (q->tail + 1) % q->cap;
+    if (next == q->head) {
+        size_t new_cap = q->cap * 2;
+        Message *new_buf = malloc(new_cap * sizeof(Message));
+        size_t i = 0, idx = q->head;
+        while (idx != q->tail) {
+            new_buf[i++] = q->buf[idx];
+            idx = (idx + 1) % q->cap;
+        }
+        free(q->buf);
+        q->buf  = new_buf;
+        q->cap  = new_cap;
+        q->head = 0;
+        q->tail = i;
+        next     = (q->tail + 1) % q->cap;
+    }
+
+    // 2) Escribimos el mensaje
+    q->buf[q->tail] = m;
+    q->tail         = next;
+
+    pthread_mutex_unlock(&q->mutex);
 }
 
-Message* get_next_for_group(ConsumerGroup *g) {
-    pthread_mutex_lock(&queue_mutex);
-    MessageNode *cur = msg_head;
-    while (cur) {
-        if (cur->msg.id > g->offset) {
-            pthread_mutex_unlock(&queue_mutex);
-            return &cur->msg;
+Message* get_next(MsgQueue *q, ConsumerGroup *g) {
+    pthread_mutex_lock(&q->mutex);
+    for (size_t idx = q->head; idx != q->tail; idx = (idx+1) % q->cap) {
+        Message *m = &q->buf[idx];
+        if (m->id > g->offset) {
+            pthread_mutex_unlock(&q->mutex);
+            return m;
         }
-        cur = cur->next;
     }
-    pthread_mutex_unlock(&queue_mutex);
+    pthread_mutex_unlock(&q->mutex);
     return NULL;
 }
 
@@ -229,11 +253,14 @@ void* handle_producer(void* arg) {
             break;
         }
 
+        /* Asignamos el ID y lo registramos */
         msg.id = next_id++;
         fprintf(log_file, "ID: %d, Contenido: %s\n", msg.id, msg.content);
         fflush(log_file);
 
-        enqueue_message(msg);
+        /* === Encolar en el buffer circular === */
+        enqueue(&queue, msg);
+
         printf("[Broker] Mensaje encolado: ID %d, Contenido: %s\n",
                msg.id, msg.content);
     }
@@ -250,40 +277,26 @@ void* handle_consumer(void* arg) {
 
     printf("[Broker] Nuevo consumer conectado (fd=%d).\n", sock);
     ConsumerGroup *g = assign_consumer_to_group(sock);
-    if (!g) {
-        send(sock, "ERROR: Grupos llenos\n", 21, 0);
-        close(sock);
-        return NULL;
-    }
-
     printf("[Broker] consumer FD=%d asignado al grupo '%s'\n", sock, g->name);
     send(sock, "READY", 5, 0);
 
     FILE *consume_log = fopen(LOG_FILE, "a");
-    if (!consume_log) {
-        perror("Error al abrir log de consumo");
-    }
+    if (!consume_log) perror("Error al abrir log de consumo");
 
     char buf[128];
     while (1) {
         int bytes = recv(sock, buf, sizeof(buf)-1, 0);
-        if (bytes <= 0) {
-            break;
-        }
+        if (bytes <= 0) break;
         buf[bytes] = '\0';
-        if (strcmp(buf, "SHUTDOWN") == 0) {
-            break;
-        }
-        if (strcmp(buf, "NEXT") != 0) {
-            continue;
-        }
+        if (strcmp(buf, "SHUTDOWN") == 0) break;
+        if (strcmp(buf, "NEXT")  != 0) continue;
 
         pthread_mutex_lock(&g->mutex);
         while (g->consumer_count > 0 && g->members[g->turn_index] != sock) {
             pthread_cond_wait(&g->cond, &g->mutex);
         }
 
-        Message *m = get_next_for_group(g);
+        Message *m = get_next(&queue, g);
         if (m) {
             g->offset = m->id;
             send(sock, m, sizeof(*m), 0);
@@ -293,7 +306,8 @@ void* handle_consumer(void* arg) {
                         g->name, sock, m->id, m->content);
                 fflush(consume_log);
             }
-        } else {
+        }
+	else {
             send(sock, "NO_MESSAGES", 11, 0);
         }
 
@@ -302,9 +316,7 @@ void* handle_consumer(void* arg) {
         pthread_mutex_unlock(&g->mutex);
     }
 
-    if (consume_log) {
-        fclose(consume_log);
-    }
+    if (consume_log) fclose(consume_log);
 
     pthread_mutex_lock(&groups_mutex);
     for (int i = 0; i < g->consumer_count; i++) {
@@ -313,22 +325,9 @@ void* handle_consumer(void* arg) {
                     &g->members[i+1],
                     (g->consumer_count - i - 1) * sizeof(int));
             g->consumer_count--;
-            if (g->turn_index >= g->consumer_count) {
-                g->turn_index = 0;
-            }
+            if (g->turn_index >= g->consumer_count) g->turn_index = 0;
             break;
         }
-    }
-    if (g->consumer_count == 0) {
-        pthread_mutex_destroy(&g->mutex);
-        pthread_cond_destroy(&g->cond);
-        free(g->members);
-        int removed_idx = (int)(g - groups);
-        for (int j = removed_idx; j < group_count - 1; j++) {
-            groups[j] = groups[j+1];
-        }
-        group_count--;
-        next_group_idx %= (group_count > 0 ? group_count : 1);
     }
     pthread_mutex_unlock(&groups_mutex);
 
@@ -413,6 +412,8 @@ int create_listener_socket(int port) {
 }
 
 int main() {
+    init_queue(&queue);
+
     init_thread_pool();
 
     int producer_fd = create_listener_socket(PRODUCER_PORT);
@@ -435,18 +436,12 @@ int main() {
     }
     pthread_mutex_destroy(&groups_mutex);
 
-    MessageNode *cur = msg_head;
-    while (cur) {
-        MessageNode *next = cur->next;
-        free(cur);
-        cur = next;
-    }
-    pthread_mutex_destroy(&queue_mutex);
-
     pthread_mutex_destroy(&task_mutex);
     pthread_cond_destroy(&task_cond);
 
     sem_destroy(&pool_sem);
 
+    pthread_mutex_destroy(&queue.mutex);
+    free(queue.buf);
     return 0;
 }
