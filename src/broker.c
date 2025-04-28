@@ -101,7 +101,10 @@ static void ensure_groups_initialized() {
 }
 
 ConsumerGroup* assign_consumer_to_group(int sock) {
-    pthread_mutex_lock(&groups_mutex);
+
+    while (pthread_mutex_trylock(&groups_mutex) != 0) {
+    	usleep(1000); // 1ms de espera antes de reintentar
+    }
 
     ensure_groups_initialized();
 
@@ -186,10 +189,15 @@ void enqueue_task(Task t) {
 }
 
 Task dequeue_task() {
-    pthread_mutex_lock(&task_mutex);
+
+    while (pthread_mutex_trylock(&task_mutex) != 0) {
+    	usleep(1000); // 1ms de espera antes de reintentar
+    } 
+
     while (!task_head) {
         pthread_cond_wait(&task_cond, &task_mutex);
     }
+
     TaskNode *n = task_head;
     task_head = n->next;
     if (!task_head) {
@@ -291,7 +299,10 @@ void* handle_consumer(void* arg) {
         if (strcmp(buf, "SHUTDOWN") == 0) break;
         if (strcmp(buf, "NEXT")  != 0) continue;
 
-        pthread_mutex_lock(&g->mutex);
+        while (pthread_mutex_trylock(&g->mutex) != 0) {
+	    usleep(1000); // 1ms de espera
+	}
+
         while (g->consumer_count > 0 && g->members[g->turn_index] != sock) {
             pthread_cond_wait(&g->cond, &g->mutex);
         }
