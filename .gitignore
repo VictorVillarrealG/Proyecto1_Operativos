@@ -5,6 +5,7 @@ consumer
 
 # Ignorar logs
 log.txt
+messages_store.txt
 
 # Ignorar otros archivos temporales
 *.o

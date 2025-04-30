@@ -14,6 +14,7 @@
 #define PRODUCER_PORT 5000
 #define CONSUMER_PORT 5001
 #define LOG_FILE "log.txt"
+#define STORE_FILE "messages_store.txt"
 #define MAX_MESSAGE_CONTENT 256
 
 #define MAX_GROUPS       3
@@ -246,9 +247,18 @@ void* handle_producer(void* arg) {
     free(info);
 
     printf("[Broker] Nuevo producer conectado.\n");
+
     FILE *log_file = fopen(LOG_FILE, "a");
     if (!log_file) {
         perror("Error al abrir archivo de log");
+        close(sock);
+        return NULL;
+    }
+
+    FILE *store_file = fopen(STORE_FILE, "a");
+    if (!store_file) {
+        perror("Error al abrir archivo de persistencia");
+        fclose(log_file);
         close(sock);
         return NULL;
     }
@@ -261,10 +271,16 @@ void* handle_producer(void* arg) {
             break;
         }
 
-        /* Asignamos el ID y lo registramos */
-        msg.id = next_id++;
+        /* Asignamos el ID de forma segura  y lo registramos */
+        pthread_mutex_lock(&queue_mutex);
+	msg.id = next_id++;
+	pthread_mutex_unlock(&queue_mutex);
+	//Guardar en log.txt
         fprintf(log_file, "ID: %d, Contenido: %s\n", msg.id, msg.content);
         fflush(log_file);
+        //Guardar en messages_store.txt
+        fprintf(store_file, "ID: %d, Contenido: %s\n", msg.id, msg.content);
+        fflush(store_file);
 
         /* === Encolar en el buffer circular === */
         enqueue(&queue, msg);
@@ -274,6 +290,7 @@ void* handle_producer(void* arg) {
     }
 
     fclose(log_file);
+    fclose(store_file);
     close(sock);
     return NULL;
 }
