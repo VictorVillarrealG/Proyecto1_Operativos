@@ -104,7 +104,7 @@ static void ensure_groups_initialized() {
 ConsumerGroup* assign_consumer_to_group(int sock) {
 
     while (pthread_mutex_trylock(&groups_mutex) != 0) {
-    	usleep(1000); // 1ms de espera antes de reintentar
+    	usleep(1000);
     }
 
     ensure_groups_initialized();
@@ -149,7 +149,6 @@ void enqueue(MsgQueue *q, Message m) {
         next     = (q->tail + 1) % q->cap;
     }
 
-    // 2) Escribimos el mensaje
     q->buf[q->tail] = m;
     q->tail         = next;
 
@@ -192,7 +191,7 @@ void enqueue_task(Task t) {
 Task dequeue_task() {
 
     while (pthread_mutex_trylock(&task_mutex) != 0) {
-    	usleep(1000); // 1ms de espera antes de reintentar
+    	usleep(1000);
     } 
 
     while (!task_head) {
@@ -214,11 +213,10 @@ Task dequeue_task() {
 void* worker_thread(void* _) {
     while (1) {
         Task t = dequeue_task();
-
+        
         ClientInfo *info = malloc(sizeof(ClientInfo));
         if (!info) {
             close(t.client_fd);
-            sem_post(&pool_sem);
             continue;
         }
         info->client_fd   = t.client_fd;
@@ -226,14 +224,11 @@ void* worker_thread(void* _) {
 
         handle_client(info);
 
-        sem_post(&pool_sem);
     }
     return NULL;
 }
 
 void init_thread_pool(void) {
-    sem_init(&pool_sem, 0, THREAD_POOL_SIZE);
-
     for (int i = 0; i < THREAD_POOL_SIZE; i++) {
         pthread_t tid;
         pthread_create(&tid, NULL, worker_thread, NULL);
@@ -271,18 +266,16 @@ void* handle_producer(void* arg) {
             break;
         }
 
-        /* Asignamos el ID de forma segura  y lo registramos */
         pthread_mutex_lock(&queue_mutex);
-	msg.id = next_id++;
-	pthread_mutex_unlock(&queue_mutex);
-	//Guardar en log.txt
+        msg.id = next_id++;
+        pthread_mutex_unlock(&queue_mutex);
+
         fprintf(log_file, "ID: %d, Contenido: %s\n", msg.id, msg.content);
         fflush(log_file);
-        //Guardar en messages_store.txt
+
         fprintf(store_file, "ID: %d, Contenido: %s\n", msg.id, msg.content);
         fflush(store_file);
 
-        /* === Encolar en el buffer circular === */
         enqueue(&queue, msg);
 
         printf("[Broker] Mensaje encolado: ID %d, Contenido: %s\n",
@@ -291,6 +284,7 @@ void* handle_producer(void* arg) {
 
     fclose(log_file);
     fclose(store_file);
+
     close(sock);
     return NULL;
 }
@@ -314,11 +308,11 @@ void* handle_consumer(void* arg) {
         if (bytes <= 0) break;
         buf[bytes] = '\0';
         if (strcmp(buf, "SHUTDOWN") == 0) break;
-        if (strcmp(buf, "NEXT")  != 0) continue;
+        if (strcmp(buf, "NEXT") != 0) continue;
 
         while (pthread_mutex_trylock(&g->mutex) != 0) {
-	    usleep(1000); // 1ms de espera
-	}
+            usleep(1000); 
+        }
 
         while (g->consumer_count > 0 && g->members[g->turn_index] != sock) {
             pthread_cond_wait(&g->cond, &g->mutex);
@@ -334,8 +328,7 @@ void* handle_consumer(void* arg) {
                         g->name, sock, m->id, m->content);
                 fflush(consume_log);
             }
-        }
-	else {
+        } else {
             send(sock, "NO_MESSAGES", 11, 0);
         }
 
@@ -349,9 +342,7 @@ void* handle_consumer(void* arg) {
     pthread_mutex_lock(&groups_mutex);
     for (int i = 0; i < g->consumer_count; i++) {
         if (g->members[i] == sock) {
-            memmove(&g->members[i],
-                    &g->members[i+1],
-                    (g->consumer_count - i - 1) * sizeof(int));
+            memmove(&g->members[i], &g->members[i + 1], (g->consumer_count - i - 1) * sizeof(int));
             g->consumer_count--;
             if (g->turn_index >= g->consumer_count) g->turn_index = 0;
             break;
@@ -367,6 +358,7 @@ void* handle_consumer(void* arg) {
     return NULL;
 }
 
+
 void* handle_client(void* arg) {
     ClientInfo* info = arg;
     int sock = info->client_fd;
@@ -380,9 +372,9 @@ void* handle_client(void* arg) {
 }
 
 void* listener_thread(void* arg) {
-    int* args        = (int*)arg;
-    int  server_fd   = args[0];
-    int  client_type = args[1];
+    int* args = (int*)arg;
+    int server_fd = args[0];
+    int client_type = args[1];
 
     while (1) {
         struct sockaddr_in client_addr;
@@ -393,21 +385,8 @@ void* listener_thread(void* arg) {
             continue;
         }
 
-        if (sem_trywait(&pool_sem) == 0) {
-            Task t = { .client_fd = client_fd, .client_type = client_type };
-            enqueue_task(t);
-        } else {
-            ClientInfo *info = malloc(sizeof(ClientInfo));
-            if (!info) { 
-                close(client_fd);
-                continue; 
-            }
-            info->client_fd   = client_fd;
-            info->client_type = client_type;
-            pthread_t tid;
-            pthread_create(&tid, NULL, handle_client, info);
-            pthread_detach(tid);
-        }
+        Task t = { .client_fd = client_fd, .client_type = client_type };
+        enqueue_task(t);
     }
 
     return NULL;
@@ -441,7 +420,6 @@ int create_listener_socket(int port) {
 
 int main() {
     init_queue(&queue);
-
     init_thread_pool();
 
     int producer_fd = create_listener_socket(PRODUCER_PORT);
@@ -457,19 +435,11 @@ int main() {
     pthread_join(producer_listener, NULL);
     pthread_join(consumer_listener, NULL);
 
-    for (int i = 0; i < group_count; i++) {
-        pthread_mutex_destroy(&groups[i].mutex);
-        pthread_cond_destroy(&groups[i].cond);
-        free(groups[i].members);
-    }
+    sem_destroy(&pool_sem);
+    pthread_mutex_destroy(&queue.mutex);
     pthread_mutex_destroy(&groups_mutex);
-
     pthread_mutex_destroy(&task_mutex);
     pthread_cond_destroy(&task_cond);
 
-    sem_destroy(&pool_sem);
-
-    pthread_mutex_destroy(&queue.mutex);
-    free(queue.buf);
     return 0;
 }
