@@ -98,7 +98,7 @@ void init_consumer_group(ConsumerGroup *g, int id) {
 
 static bool     groups_initialized = false;
 static int      next_group_idx     = 0;
-
+//ensure
 static void ensure_groups_initialized() {
     if (!groups_initialized) {
         for (int i = 0; i < MAX_GROUPS; i++) {
