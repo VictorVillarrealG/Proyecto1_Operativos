@@ -50,7 +50,7 @@ int main() {
     printf("Broker dice: %s\n", buffer);
 
     while (1) {
-	sleep(1);
+	usleep(10000);
         send(sock, "NEXT", strlen("NEXT"), 0);
 
 	bytes = recv(sock, buffer, sizeof(buffer), 0);
