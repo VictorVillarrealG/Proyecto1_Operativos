@@ -1,5 +1,3 @@
-/* broker.c - Broker Central usando PUERTOS SEPARADOS con tipo de cliente controlado */
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -10,7 +8,8 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <stdbool.h>
-
+#include <time.h>
+#include <errno.h>
 #define PRODUCER_PORT 5000
 #define CONSUMER_PORT 5001
 #define LOG_FILE "log.txt"
@@ -19,9 +18,12 @@
 
 #define MAX_GROUPS       3
 #define MAX_GROUP_NAME   64
+#define MAX_QUEUE_SIZE 100
+#define MAX_QUEUE_CAPACITY 1024
 
 #define THREAD_POOL_SIZE  (MAX_GROUPS * 6)
-
+pthread_cond_t not_full = PTHREAD_COND_INITIALIZER;
+pthread_cond_t not_empty = PTHREAD_COND_INITIALIZER;
 void* handle_client(void* arg);
 static sem_t pool_sem;
 
@@ -46,9 +48,13 @@ typedef struct {
 
 typedef struct {
     Message *buf;
-    size_t cap, head, tail;
+    size_t cap;
+    size_t head;
+    size_t tail;
     pthread_mutex_t mutex;
 } MsgQueue;
+
+
 
 static MsgQueue queue;
 static pthread_mutex_t queue_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -69,9 +75,10 @@ static int           group_count = 0;
 static pthread_mutex_t groups_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 void init_queue(MsgQueue *q) {
-    q->cap  = 1024;
+    q->cap  = MAX_QUEUE_CAPACITY;
     q->buf  = malloc(q->cap * sizeof(Message));
-    q->head = q->tail = 0;
+    q->head = 0;
+    q->tail = 0;
     pthread_mutex_init(&q->mutex, NULL);
 }
 
@@ -90,7 +97,7 @@ void init_consumer_group(ConsumerGroup *g, int id) {
 
 static bool     groups_initialized = false;
 static int      next_group_idx     = 0;
-
+//ensure
 static void ensure_groups_initialized() {
     if (!groups_initialized) {
         for (int i = 0; i < MAX_GROUPS; i++) {
@@ -129,31 +136,27 @@ ConsumerGroup* assign_consumer_to_group(int sock) {
     return g;
 }
 
-void enqueue(MsgQueue *q, Message m) {
+int enqueue(MsgQueue *q, Message msg) {
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    ts.tv_sec += 5;
+
     pthread_mutex_lock(&q->mutex);
 
-    size_t next = (q->tail + 1) % q->cap;
-    if (next == q->head) {
-        size_t new_cap = q->cap * 2;
-        Message *new_buf = malloc(new_cap * sizeof(Message));
-        size_t i = 0, idx = q->head;
-        while (idx != q->tail) {
-            new_buf[i++] = q->buf[idx];
-            idx = (idx + 1) % q->cap;
-        }
-        free(q->buf);
-        q->buf  = new_buf;
-        q->cap  = new_cap;
-        q->head = 0;
-        q->tail = i;
-        next     = (q->tail + 1) % q->cap;
-    }
-
-    q->buf[q->tail] = m;
-    q->tail         = next;
-
-    pthread_mutex_unlock(&q->mutex);
+    // La cola está llena si el próximo tail es igual a head
+  while (((q->tail + 1) % q->cap) == q->head) {
+    pthread_cond_wait(&not_full, &q->mutex);  // sin tiempo límite
 }
+
+
+    q->buf[q->tail] = msg;
+    q->tail = (q->tail + 1) % q->cap;
+
+    pthread_cond_signal(&not_empty);
+    pthread_mutex_unlock(&q->mutex);
+    return 0;
+}
+
 
 Message* get_next(MsgQueue *q, ConsumerGroup *g) {
     pthread_mutex_lock(&q->mutex);
@@ -189,13 +192,19 @@ void enqueue_task(Task t) {
 }
 
 Task dequeue_task() {
+    pthread_mutex_lock(&task_mutex);
 
-    while (pthread_mutex_trylock(&task_mutex) != 0) {
-    	usleep(1000);
-    } 
+    // Espera hasta 5 segundos por una nueva tarea
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    ts.tv_sec += 5;
 
     while (!task_head) {
-        pthread_cond_wait(&task_cond, &task_mutex);
+        if (pthread_cond_timedwait(&task_cond, &task_mutex, &ts) == ETIMEDOUT) {
+            pthread_mutex_unlock(&task_mutex);
+            Task empty = { .client_fd = -1, .client_type = -1 };
+            return empty; // señal de que no hay tarea disponible
+        }
     }
 
     TaskNode *n = task_head;
@@ -213,7 +222,9 @@ Task dequeue_task() {
 void* worker_thread(void* _) {
     while (1) {
         Task t = dequeue_task();
-        
+           if (t.client_fd == -1) {
+            continue;
+        }
         ClientInfo *info = malloc(sizeof(ClientInfo));
         if (!info) {
             close(t.client_fd);

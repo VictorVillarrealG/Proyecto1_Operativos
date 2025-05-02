@@ -1,0 +1,4 @@
+Conectado al broker (consumer por tiempo).
+Broker dice: READY
+Respuesta del broker: NO_MESSAGES
+No se han recibido mensajes en 10 segundos. Enviando mensaje de apagado al broker y cerrando.
