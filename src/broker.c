@@ -10,7 +10,6 @@
 #include <stdbool.h>
 #include <time.h>
 #include <errno.h>
-
 #define PRODUCER_PORT 5000
 #define CONSUMER_PORT 5001
 #define LOG_FILE "log.txt"
