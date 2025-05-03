@@ -10,6 +10,10 @@
 #include <stdbool.h>
 #include <time.h>
 #include <errno.h>
+#include <signal.h> 
+#include <stdatomic.h>
+#include <fcntl.h>
+
 #define PRODUCER_PORT 5000
 #define CONSUMER_PORT 5001
 #define LOG_FILE "log.txt"
@@ -26,6 +30,8 @@ pthread_cond_t not_full = PTHREAD_COND_INITIALIZER;
 pthread_cond_t not_empty = PTHREAD_COND_INITIALIZER;
 void* handle_client(void* arg);
 static sem_t pool_sem;
+
+static atomic_int server_running = 1;
 
 typedef struct {
     int client_fd;
@@ -54,8 +60,6 @@ typedef struct {
     pthread_mutex_t mutex;
 } MsgQueue;
 
-
-
 static MsgQueue queue;
 static pthread_mutex_t queue_mutex = PTHREAD_MUTEX_INITIALIZER;
 
@@ -72,7 +76,28 @@ typedef struct {
 
 static ConsumerGroup groups[MAX_GROUPS];
 static int           group_count = 0;
-static pthread_mutex_t groups_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t groups_mutex = 
+PTHREAD_MUTEX_INITIALIZER;
+
+void shutdown_server(int sig) {
+    atomic_store(&server_running, 0);
+    printf("\n[Broker] Señal de terminación recibida. Cerrando el servidor...\n");
+    
+    pthread_mutex_lock(&task_mutex);
+    pthread_cond_broadcast(&task_cond);
+    pthread_mutex_unlock(&task_mutex);
+    
+    pthread_mutex_lock(&queue_mutex);
+    pthread_cond_signal(&not_empty);
+    pthread_cond_signal(&not_full);
+    pthread_mutex_unlock(&queue_mutex);
+    
+    for (int i = 0; i < MAX_GROUPS; i++) {
+        pthread_mutex_lock(&groups[i].mutex);
+        pthread_cond_broadcast(&groups[i].cond);
+        pthread_mutex_unlock(&groups[i].mutex);
+    }
+}
 
 void init_queue(MsgQueue *q) {
     q->cap  = MAX_QUEUE_CAPACITY;
@@ -97,7 +122,7 @@ void init_consumer_group(ConsumerGroup *g, int id) {
 
 static bool     groups_initialized = false;
 static int      next_group_idx     = 0;
-//ensure
+
 static void ensure_groups_initialized() {
     if (!groups_initialized) {
         for (int i = 0; i < MAX_GROUPS; i++) {
@@ -143,11 +168,9 @@ int enqueue(MsgQueue *q, Message msg) {
 
     pthread_mutex_lock(&q->mutex);
 
-    // La cola está llena si el próximo tail es igual a head
   while (((q->tail + 1) % q->cap) == q->head) {
-    pthread_cond_wait(&not_full, &q->mutex);  // sin tiempo límite
+    pthread_cond_wait(&not_full, &q->mutex);  
 }
-
 
     q->buf[q->tail] = msg;
     q->tail = (q->tail + 1) % q->cap;
@@ -156,7 +179,6 @@ int enqueue(MsgQueue *q, Message msg) {
     pthread_mutex_unlock(&q->mutex);
     return 0;
 }
-
 
 Message* get_next(MsgQueue *q, ConsumerGroup *g) {
     pthread_mutex_lock(&q->mutex);
@@ -194,17 +216,23 @@ void enqueue_task(Task t) {
 Task dequeue_task() {
     pthread_mutex_lock(&task_mutex);
 
-    // Espera hasta 5 segundos por una nueva tarea
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
-    ts.tv_sec += 5;
+    ts.tv_sec += 1;
 
-    while (!task_head) {
-        if (pthread_cond_timedwait(&task_cond, &task_mutex, &ts) == ETIMEDOUT) {
+    while (!task_head && atomic_load(&server_running)) {
+        int wait_result = pthread_cond_timedwait(&task_cond, &task_mutex, &ts);
+        if (wait_result == ETIMEDOUT || !atomic_load(&server_running)) {
             pthread_mutex_unlock(&task_mutex);
             Task empty = { .client_fd = -1, .client_type = -1 };
-            return empty; // señal de que no hay tarea disponible
+            return empty; 
         }
+    }
+    
+    if (!task_head || !atomic_load(&server_running)) {
+        pthread_mutex_unlock(&task_mutex);
+        Task empty = { .client_fd = -1, .client_type = -1 };
+        return empty;
     }
 
     TaskNode *n = task_head;
@@ -220,11 +248,15 @@ Task dequeue_task() {
 }
 
 void* worker_thread(void* _) {
-    while (1) {
+    while (atomic_load(&server_running)) {
         Task t = dequeue_task();
-           if (t.client_fd == -1) {
+        if (t.client_fd == -1) {
+            if (!atomic_load(&server_running)) {
+                break;
+            }
             continue;
         }
+        
         ClientInfo *info = malloc(sizeof(ClientInfo));
         if (!info) {
             close(t.client_fd);
@@ -234,16 +266,15 @@ void* worker_thread(void* _) {
         info->client_type = t.client_type;
 
         handle_client(info);
-
     }
     return NULL;
 }
 
 void init_thread_pool(void) {
+    pthread_t tids[THREAD_POOL_SIZE];
     for (int i = 0; i < THREAD_POOL_SIZE; i++) {
-        pthread_t tid;
-        pthread_create(&tid, NULL, worker_thread, NULL);
-        pthread_detach(tid);
+        pthread_create(&tids[i], NULL, worker_thread, NULL);
+        pthread_detach(tids[i]);
     }
 }
 
@@ -251,16 +282,13 @@ void* handle_producer(void* arg) {
     ClientInfo* info = (ClientInfo*)arg;
     int sock = info->client_fd;
     free(info);
-
     printf("[Broker] Nuevo producer conectado.\n");
-
     FILE *log_file = fopen(LOG_FILE, "a");
     if (!log_file) {
         perror("Error al abrir archivo de log");
         close(sock);
         return NULL;
     }
-
     FILE *store_file = fopen(STORE_FILE, "a");
     if (!store_file) {
         perror("Error al abrir archivo de persistencia");
@@ -268,34 +296,25 @@ void* handle_producer(void* arg) {
         close(sock);
         return NULL;
     }
-
-    while (1) {
+    while (atomic_load(&server_running)) {
         Message msg;
         int bytes = recv(sock, &msg, sizeof(msg), 0);
         if (bytes <= 0) {
             printf("[Broker] Producer desconectado.\n");
             break;
         }
-
         pthread_mutex_lock(&queue_mutex);
         msg.id = next_id++;
-        pthread_mutex_unlock(&queue_mutex);
-
         fprintf(log_file, "ID: %d, Contenido: %s\n", msg.id, msg.content);
         fflush(log_file);
-
         fprintf(store_file, "ID: %d, Contenido: %s\n", msg.id, msg.content);
         fflush(store_file);
-
         enqueue(&queue, msg);
-
-        printf("[Broker] Mensaje encolado: ID %d, Contenido: %s\n",
-               msg.id, msg.content);
+        pthread_mutex_unlock(&queue_mutex);
+        printf("[Broker] Mensaje encolado: ID %d, Contenido: %s\n", msg.id, msg.content);
     }
-
     fclose(log_file);
     fclose(store_file);
-
     close(sock);
     return NULL;
 }
@@ -314,19 +333,60 @@ void* handle_consumer(void* arg) {
     if (!consume_log) perror("Error al abrir log de consumo");
 
     char buf[128];
-    while (1) {
+    while (atomic_load(&server_running)) { 
+        fd_set readfds;
+        FD_ZERO(&readfds);
+        FD_SET(sock, &readfds);
+        
+        struct timeval tv;
+        tv.tv_sec = 0;
+        tv.tv_usec = 500000; 
+        
+        int ready = select(sock + 1, &readfds, NULL, NULL, &tv);
+        if (ready <= 0) {
+            if (!atomic_load(&server_running)) break;
+            if (ready < 0 && errno != EINTR) break;
+            continue;
+        }
+        
         int bytes = recv(sock, buf, sizeof(buf)-1, 0);
         if (bytes <= 0) break;
         buf[bytes] = '\0';
+        
         if (strcmp(buf, "SHUTDOWN") == 0) break;
         if (strcmp(buf, "NEXT") != 0) continue;
 
-        while (pthread_mutex_trylock(&g->mutex) != 0) {
-            usleep(1000); 
+        int lock_result;
+        struct timespec lock_timeout;
+        clock_gettime(CLOCK_REALTIME, &lock_timeout);
+        lock_timeout.tv_sec += 1;  
+        
+        lock_result = pthread_mutex_timedlock(&g->mutex, &lock_timeout);
+        if (lock_result != 0) {
+            if (!atomic_load(&server_running)) break;
+            continue;
         }
 
-        while (g->consumer_count > 0 && g->members[g->turn_index] != sock) {
-            pthread_cond_wait(&g->cond, &g->mutex);
+        if (!atomic_load(&server_running)) {
+            pthread_mutex_unlock(&g->mutex);
+            break;
+        }
+
+        while (g->consumer_count > 0 && g->members[g->turn_index] != sock && 
+               atomic_load(&server_running)) {
+            struct timespec ts;
+            clock_gettime(CLOCK_REALTIME, &ts);
+            ts.tv_sec += 1; 
+            
+            int wait_result = pthread_cond_timedwait(&g->cond, &g->mutex, &ts);
+            if (!atomic_load(&server_running) || wait_result == ETIMEDOUT) {
+                break;
+            }
+        }
+        
+        if (!atomic_load(&server_running)) {
+            pthread_mutex_unlock(&g->mutex);
+            break;
         }
 
         Message *m = get_next(&queue, g);
@@ -350,25 +410,27 @@ void* handle_consumer(void* arg) {
 
     if (consume_log) fclose(consume_log);
 
-    pthread_mutex_lock(&groups_mutex);
-    for (int i = 0; i < g->consumer_count; i++) {
-        if (g->members[i] == sock) {
-            memmove(&g->members[i], &g->members[i + 1], (g->consumer_count - i - 1) * sizeof(int));
-            g->consumer_count--;
-            if (g->turn_index >= g->consumer_count) g->turn_index = 0;
-            break;
+    if (pthread_mutex_timedlock(&groups_mutex, &(struct timespec){.tv_sec = time(NULL) + 1}) == 0) {
+        for (int i = 0; i < g->consumer_count; i++) {
+            if (g->members[i] == sock) {
+                memmove(&g->members[i], &g->members[i + 1], 
+                       (g->consumer_count - i - 1) * sizeof(int));
+                g->consumer_count--;
+                if (g->turn_index >= g->consumer_count) g->turn_index = 0;
+                break;
+            }
         }
+        pthread_mutex_unlock(&groups_mutex);
     }
-    pthread_mutex_unlock(&groups_mutex);
 
-    pthread_mutex_lock(&g->mutex);
-    pthread_cond_broadcast(&g->cond);
-    pthread_mutex_unlock(&g->mutex);
+    if (pthread_mutex_timedlock(&g->mutex, &(struct timespec){.tv_sec = time(NULL) + 1}) == 0) {
+        pthread_cond_broadcast(&g->cond);
+        pthread_mutex_unlock(&g->mutex);
+    }
 
     close(sock);
     return NULL;
 }
-
 
 void* handle_client(void* arg) {
     ClientInfo* info = arg;
@@ -387,11 +449,19 @@ void* listener_thread(void* arg) {
     int server_fd = args[0];
     int client_type = args[1];
 
-    while (1) {
-        struct sockaddr_in client_addr;
-        socklen_t addrlen = sizeof(client_addr);
+    struct sockaddr_in client_addr;
+    socklen_t addrlen = sizeof(client_addr);
+    
+    int flags = fcntl(server_fd, F_GETFL, 0);
+    fcntl(server_fd, F_SETFL, flags | O_NONBLOCK);
+
+    while (atomic_load(&server_running)) {
         int client_fd = accept(server_fd, (struct sockaddr*)&client_addr, &addrlen);
         if (client_fd < 0) {
+            if (errno == EWOULDBLOCK || errno == EAGAIN) {
+                usleep(100000);  
+                continue;
+            }
             perror("accept");
             continue;
         }
@@ -430,8 +500,12 @@ int create_listener_socket(int port) {
 }
 
 int main() {
+    signal(SIGINT, shutdown_server);
+    
     init_queue(&queue);
-    init_thread_pool();
+    
+    pthread_t worker_threads[THREAD_POOL_SIZE];
+    init_thread_pool();  
 
     int producer_fd = create_listener_socket(PRODUCER_PORT);
     int consumer_fd = create_listener_socket(CONSUMER_PORT);
@@ -443,14 +517,37 @@ int main() {
     pthread_create(&producer_listener, NULL, listener_thread, producer_args);
     pthread_create(&consumer_listener, NULL, listener_thread, consumer_args);
 
+    while (atomic_load(&server_running)) {
+        sleep(1);
+    }
+
+    close(producer_fd);
+    close(consumer_fd);
+
+    printf("[Broker] Esperando a que terminen los threads...\n");
     pthread_join(producer_listener, NULL);
     pthread_join(consumer_listener, NULL);
+    
+    sleep(2);
 
+    printf("[Broker] Liberando recursos...\n");
+    
     sem_destroy(&pool_sem);
     pthread_mutex_destroy(&queue.mutex);
-    pthread_mutex_destroy(&groups_mutex);
     pthread_mutex_destroy(&task_mutex);
     pthread_cond_destroy(&task_cond);
-
+    pthread_cond_destroy(&not_empty);
+    pthread_cond_destroy(&not_full);
+    
+    for (int i = 0; i < MAX_GROUPS; i++) {
+        pthread_mutex_destroy(&groups[i].mutex);
+        pthread_cond_destroy(&groups[i].cond);
+        free(groups[i].members);
+    }
+    pthread_mutex_destroy(&groups_mutex);
+    
+    free(queue.buf);
+    
+    printf("[Broker] Terminado.\n");
     return 0;
 }

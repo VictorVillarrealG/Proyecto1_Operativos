@@ -38,7 +38,8 @@ int main() {
     printf("Conectado al broker (producer).\n");
 
     Message msg;
-    msg.id = 0;  // El broker asignará el ID final
+    memset(&msg, 0, sizeof(Message));  
+    msg.id = 0;  
     snprintf(msg.content, MAX_MESSAGE_CONTENT, "Hola desde el producer!");
 
     if (send(sock_fd, &msg, sizeof(Message), 0) == -1) {
