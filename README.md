@@ -47,25 +47,27 @@ En otra terminal (para probar consumer):
 
 ## Estrategia para evitar interbloqueos
 El sistema aplica varias técnicas para evitar interbloqueos:
-Orden fijo de adquisición de locks: se accede siempre en el mismo orden a mutex de estructuras compartidas.
+- Orden fijo de adquisición de locks: se accede siempre en el mismo orden a mutex de estructuras compartidas.
 
-`pthread_mutex_trylock` y `pthread_mutex_timedlock`: se usan para evitar bloqueos indefinidos en zonas críticas.
+- `pthread_mutex_trylock` y `pthread_mutex_timedlock`: se usan para evitar bloqueos indefinidos en zonas críticas.
 
-Broadcast controlado con `pthread_cond_broadcast` y `pthread_cond_timedwait` permite que los consumidores se turnen sin bloquearse mutuamente.
+- Broadcast controlado con `pthread_cond_broadcast` y `pthread_cond_timedwait` permite que los consumidores se turnen sin bloquearse mutuamente.
 
 
 ---
 
 ## Problemas conocidos o limitaciones
-El broker actual funciona como único nodo. No hay replicación ni distribución multi-broker.
+- El broker actual funciona como único nodo. No hay replicación ni distribución multi-broker.
 
-No se implementó el algoritmo del banquero como estrategia adicional.
+- No se implementó el algoritmo del banquero como estrategia adicional.
 
-El archivo `messages_store.txt` se abre en modo append, por lo que contiene todo el historial de mensajes a menos que se borre manualmente.
+- El archivo `messages_store.txt` se abre en modo append, por lo que contiene todo el historial de mensajes a menos que se borre manualmente.
 
-Si se lanza más de 1000 procesos simultáneamente, puede saturarse el sistema operativo en entornos con pocos recursos (como VMs).
+- Si se lanza más de 1000 procesos simultáneamente, puede saturarse el sistema operativo en entornos con pocos recursos (como VMs).
 
-Dado que los consumidores se organizan por grupos y consumen por turnos, el archivo `log.txt` puede mostrar mensajes con IDs no secuenciales entre líneas. Esto es un comportamiento normal en sistemas concurrentes, donde los grupos procesan a velocidades distintas. En otras palabras, los consumidores esperan su turno y pueden recibir mensajes con IDs no consecutivos desde el punto global, pero son consistentes dentro del grupo como tal...Como cada grupo avanza a su propio ritmo, el orden de entrega por grupo puede verse intercalado en el log global.  
+- Dado que los consumidores se organizan por grupos y consumen por turnos, el archivo `log.txt` puede mostrar mensajes con IDs no secuenciales entre líneas. Esto es un comportamiento normal en sistemas concurrentes, donde los grupos procesan a velocidades distintas. En otras palabras, los consumidores esperan su turno y pueden recibir mensajes con IDs no consecutivos desde el punto global, pero son consistentes dentro del grupo como tal...Como cada grupo avanza a su propio ritmo, el orden de entrega por grupo puede verse intercalado en el log global.
+
+- Cada consumidor revisa el broker cada 0.5 segundos para solicitar nuevos mensajes, lo cual es un comportamiento deliberado para controlar el flujo de consultas y no una limitación de rendimiento. 
 
 ---
 
