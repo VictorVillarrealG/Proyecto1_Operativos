@@ -37,10 +37,10 @@ Esto genera los ejecutables de broker, producer y consumer.
 En una terminal:
 ./broker
 
-En otra terminal - para probar producer:
+En otra terminal (para probar producer):
 ./producer
 
-En otra terminal - para probar consumer:
+En otra terminal (para probar consumer):
 ./consumer
 
 ---
@@ -64,6 +64,8 @@ No se implementó el algoritmo del banquero como estrategia adicional.
 El archivo `messages_store.txt` se abre en modo append, por lo que contiene todo el historial de mensajes a menos que se borre manualmente.
 
 Si se lanza más de 1000 procesos simultáneamente, puede saturarse el sistema operativo en entornos con pocos recursos (como VMs).
+
+Dado que los consumidores se organizan por grupos y consumen por turnos, el archivo `log.txt` puede mostrar mensajes con IDs no secuenciales entre líneas. Esto es un comportamiento normal en sistemas concurrentes, donde los grupos procesan a velocidades distintas. En otras palabras, los consumidores esperan su turno y pueden recibir mensajes con IDs no consecutivos desde el punto global, pero son consistentes dentro del grupo como tal...Como cada grupo avanza a su propio ritmo, el orden de entrega por grupo puede verse intercalado en el log global.  
 
 ---
 
